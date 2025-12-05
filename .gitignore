@@ -1,0 +1,11 @@
+.env
+artifacts/
+reports/
+*.pyc
+__pycache__/
+*.log
+.DS_Store
+
+
+
+

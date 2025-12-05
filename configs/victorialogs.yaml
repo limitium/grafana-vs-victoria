@@ -1,0 +1,15 @@
+# VictoriaLogs single-node configuration
+# HTTP ingestion endpoint: http://victorialogs:9428/insert/logs
+
+server:
+  httpListenAddr: ":9428"
+  tlsEnable: false
+
+storage:
+  retentionPeriod: 30d
+  dataPath: /vlogs
+
+bigMergeConcurrency: 4
+smallMergeConcurrency: 2
+
+

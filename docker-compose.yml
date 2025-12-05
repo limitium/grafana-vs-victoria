@@ -1,0 +1,282 @@
+version: "3.9"
+
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    platform: linux/arm64/v8
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.enable-lifecycle"
+      - "--storage.tsdb.retention.time=30d"
+    volumes:
+      - ./configs/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prom_data:/prometheus
+    ports:
+      - "9090:9090"
+    deploy:
+      resources:
+        limits:
+          cpus: "3.0"
+          memory: 3g
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  victoriametrics:
+    image: victoriametrics/victoria-metrics:latest
+    platform: linux/arm64/v8
+    command:
+      - "-storageDataPath=/vmdata"
+      - "-httpListenAddr=:8428"
+    ports:
+      - "8428:8428"
+    volumes:
+      - vm_data:/vmdata
+    deploy:
+      resources:
+        limits:
+          cpus: "3.0"
+          memory: 3g
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8428/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  loki:
+    image: grafana/loki:2.9.0
+    platform: linux/arm64/v8
+    command:
+      - "-config.file=/etc/loki/local-config.yaml"
+    volumes:
+      - ./configs/loki.yml:/etc/loki/local-config.yaml:ro
+      - loki_data:/loki
+    ports:
+      - "3100:3100"
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2g
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3100/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  victorialogs:
+    image: victoriametrics/victoria-logs:latest
+    platform: linux/arm64/v8
+    command:
+      - "-storageDataPath=/vlogs"
+      - "-httpListenAddr=:9428"
+    volumes:
+      - vlogs_data:/vlogs
+    ports:
+      - "9428:9428"
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2g
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9428/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  tempo:
+    image: grafana/tempo:latest
+    platform: linux/arm64/v8
+    command:
+      - "-config.file=/etc/tempo/tempo.yaml"
+    volumes:
+      - ./configs/tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - tempo_data:/var/tempo
+    ports:
+      - "3200:3200"
+      - "4319:4318"
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2g
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3200/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  victoriatraces:
+    image: victoriametrics/victoria-traces:latest
+    platform: linux/arm64/v8
+    command:
+      - "-storageDataPath=/vtraces"
+      - "-httpListenAddr=:9410"
+    volumes:
+      - vtraces_data:/vtraces
+    ports:
+      - "9410:9410"
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2g
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9410/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  promtail_loki:
+    image: grafana/promtail:2.9.0
+    platform: linux/arm64/v8
+    command:
+      - "-config.file=/etc/promtail/config.yml"
+    volumes:
+      - ./configs/promtail-loki.yml:/etc/promtail/config.yml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      - loki
+      - victorialogs
+      - logs_load
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512m
+
+  vmagent:
+    image: victoriametrics/vmagent:latest
+    platform: linux/arm64/v8
+    command:
+      - "-promscrape.config=/etc/vmagent.yml"
+      - "-remoteWrite.url=http://victoriametrics:8428/api/v1/write"
+    volumes:
+      - ./configs/vmagent.yml:/etc/vmagent.yml:ro
+    depends_on:
+      - victoriametrics
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512m
+
+  metrics_load:
+    build: ./loadgen/metrics
+    platform: linux/arm64/v8
+    environment:
+      - SERIES_TOTAL=${SERIES_TOTAL:-200000}
+      - CHURN_RATE=${CHURN_RATE:-0.02}
+      - SCRAPE_INTERVAL=${SCRAPE_INTERVAL:-10}
+      - SEED=${SEED:-42}
+      - BENCHMARK_RUN_ID=${BENCHMARK_RUN_ID:-benchmark-default}
+    ports:
+      - "9101:9100"
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512m
+
+  logs_load:
+    build: ./loadgen/logs
+    platform: linux/arm64/v8
+    environment:
+      - LOG_RATE=${LOG_RATE:-5000}
+      - JSON_FIELDS=${JSON_FIELDS:-8}
+      - BURST_FACTOR=${BURST_FACTOR:-5}
+      - SEED=${SEED:-42}
+      - BENCHMARK_RUN_ID=${BENCHMARK_RUN_ID:-benchmark-default}
+    # Remove HTTP push - logs go to stdout, forwarder will handle VictoriaLogs
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512m
+
+  traces_load:
+    build: ./loadgen/traces
+    platform: linux/arm64/v8
+    environment:
+      - OTLP_TEMPO=http://tempo:4318
+      - OTLP_VTRACES=http://victoriatraces:9410
+      - SPANS_PER_SEC=${SPANS_PER_SEC:-2000}
+      - SERVICES=${SERVICES:-10}
+      - DEPTH=${DEPTH:-3}
+      - ERROR_RATE=${ERROR_RATE:-0.05}
+      - SEED=${SEED:-42}
+      - BENCHMARK_RUN_ID=${BENCHMARK_RUN_ID:-benchmark-default}
+    depends_on:
+      - tempo
+      - victoriatraces
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512m
+
+  orchestrator:
+    build: ./orchestrator
+    platform: linux/arm64/v8
+    command: python -u /app/main.py run --all
+    environment:
+      - PYTHONUNBUFFERED=1
+      - SCENARIOS=${SCENARIOS:-steady,burst,cardinality}
+      - DURATION_STEADY=60
+      - DURATION_BURST=60
+      - DURATION_CARD=60
+      - COMPOSE_PROJECT_NAME=${COMPOSE_PROJECT_NAME:-obs-bench}
+      - BENCHMARK_RUN_ID=${BENCHMARK_RUN_ID:-benchmark-default}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./artifacts:/artifacts
+    depends_on:
+      prometheus:
+        condition: service_healthy
+      victoriametrics:
+        condition: service_healthy
+      loki:
+        condition: service_healthy
+      victorialogs:
+        condition: service_healthy
+      tempo:
+        condition: service_started
+      victoriatraces:
+        condition: service_healthy
+      metrics_load:
+        condition: service_started
+      logs_load:
+        condition: service_started
+      traces_load:
+        condition: service_started
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1g
+
+  reporter:
+    build: ./reporter
+    platform: linux/arm64/v8
+    volumes:
+      - ./artifacts:/artifacts:ro
+      - ./reports:/reports
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1g
+
+volumes:
+  prom_data:
+  vm_data:
+  loki_data:
+  vlogs_data:
+  tempo_data:
+  vtraces_data:
+
